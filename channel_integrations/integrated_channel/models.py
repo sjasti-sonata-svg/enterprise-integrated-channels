@@ -110,6 +110,15 @@ class EnterpriseCustomerPluginConfiguration(SoftDeletionModel):
     overridden, where ``x`` and ``y`` are (learner, course) and (exporter, transmitter) respectively.
     """
 
+    # Problems ``is_valid`` reports that do not stop the channel being reached. ``is_valid`` splits
+    # its findings by shape -- absent values under 'missing', present-but-wrong ones under
+    # 'incorrect' -- which is not the same split as "stops a transmission". An unparseable private
+    # key or a malformed base URL is 'incorrect' and certainly does stop one; an over-long
+    # display_name only matters to the admin portal. A channel gating on ``is_valid`` should treat
+    # everything except these as blocking, so that a cosmetic problem never takes a working
+    # integration offline.
+    COSMETIC_CONFIG_PROBLEMS = frozenset({'display_name'})
+
     display_name = models.CharField(
         max_length=255,
         blank=True,

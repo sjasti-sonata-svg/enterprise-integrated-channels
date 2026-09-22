@@ -379,10 +379,12 @@ class SAPSuccessFactorsEnterpriseCustomerConfiguration(EnterpriseCustomerPluginC
         cannot obtain a token at all, so letting the sync start only trades a clear configuration
         error for an opaque SAP authentication failure raised deep inside a worker.
 
-        Gates on what ``is_valid`` reports as absent rather than on everything it reports: a
-        configuration can also be flagged for problems that do not stop it authenticating, such as a
-        ``display_name`` too long for the admin portal, and those must not stop a working sync.
-        ``is_valid`` returns a ``(missing, incorrect)`` pair, so only the first half is consulted.
+        Blocks on both halves of ``is_valid``, not just the absent values. A key that is present but
+        unparseable, or a base URL that is present but malformed, stops a transmission every bit as
+        surely as one that was never filled in -- and a malformed key is exactly what the PEM check
+        exists to catch, so letting it through here would waste the finding. Only the problems named
+        in ``COSMETIC_CONFIG_PROBLEMS`` are ignored, so a customer that is otherwise syncing
+        correctly is never taken offline over something the channel does not care about.
 
         Args:
             task_name: name of the calling method, used only in the log line.
@@ -395,17 +397,30 @@ class SAPSuccessFactorsEnterpriseCustomerConfiguration(EnterpriseCustomerPluginC
         Returns:
             bool: whether the caller should proceed.
         """
-        missing_items, _ = self.is_valid
-        missing_fields = missing_items.get('missing', [])
-        if not missing_fields:
+        missing_items, incorrect_items = self.is_valid
+        missing_fields = [
+            field for field in missing_items.get('missing', [])
+            if field not in self.COSMETIC_CONFIG_PROBLEMS
+        ]
+        invalid_fields = [
+            field for field in incorrect_items.get('incorrect', [])
+            if field not in self.COSMETIC_CONFIG_PROBLEMS
+        ]
+        if not missing_fields and not invalid_fields:
             return True
+
+        problems = []
+        if missing_fields:
+            problems.append(f'missing: {", ".join(missing_fields)}')
+        if invalid_fields:
+            problems.append(f'invalid: {", ".join(invalid_fields)}')
         LOGGER.warning(
             generate_formatted_log(
                 channel_name=self.channel_code(),
                 enterprise_customer_uuid=self.enterprise_customer.uuid,
                 plugin_configuration_id=self.id,
-                message=f'{task_name} aborted before any request to the channel because required '
-                        f'configuration is missing: {", ".join(missing_fields)}.'
+                message=f'{task_name} aborted before any request to the channel because its '
+                        f'configuration cannot authenticate ({"; ".join(problems)}).'
             )
         )
         if record_attempt is not None:

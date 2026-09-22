@@ -15,6 +15,7 @@ from channel_integrations.integrated_channel.models import (
     EnterpriseCustomerPluginConfiguration,
     IntegratedChannelAPIRequestLogs,
 )
+from channel_integrations.sap_success_factors.models import SAPAuthType
 from test_utils import factories
 from test_utils.fake_catalog_api import FAKE_COURSE_RUN, get_fake_catalog, get_fake_content_metadata
 from test_utils.fake_enterprise_api import EnterpriseMockMixin
@@ -402,6 +403,68 @@ class TestTransmissionPreflightCheck(unittest.TestCase):
             self.config.transmit_content_metadata(self.user)
 
         exporter.assert_called_once_with(self.user)
+
+    def test_preflight_aborts_on_an_unparseable_private_key(self):
+        """
+        A key that is present but cannot be parsed still cannot sign an assertion.
+
+        ``is_valid`` reports it under 'incorrect' rather than 'missing' because the field is filled
+        in, but the transmission would fail just as surely -- and failing here is the whole point of
+        validating the key, so the gate must not wave it through.
+        """
+        self.config.auth_type = SAPAuthType.SELF_SIGNED_ASSERTION
+        self.config.decrypted_private_key = (
+            '-----BEGIN PRIVATE KEY-----\nnot-real-key-material\n-----END PRIVATE KEY-----\n'
+        )
+
+        missing, incorrect = self.config.is_valid
+        assert 'private_key' not in missing['missing']
+        assert 'private_key' in incorrect['incorrect']
+
+        with mock.patch.object(self.config, 'get_content_metadata_exporter') as exporter, \
+                mock.patch.object(self.config, 'get_content_metadata_transmitter') as transmitter:
+            self.config.transmit_content_metadata(self.user)
+
+        exporter.assert_not_called()
+        transmitter.assert_not_called()
+
+    def test_preflight_aborts_on_a_malformed_base_url(self):
+        """
+        A base URL that is present but not a URL leaves the channel unreachable.
+
+        Also reported under 'incorrect', and also genuinely blocking.
+        """
+        self.config.sapsf_base_url = 'not a url at all'
+
+        missing, incorrect = self.config.is_valid
+        assert 'sapsf_base_url' not in missing['missing']
+        assert 'sapsf_base_url' in incorrect['incorrect']
+
+        with mock.patch.object(self.config, 'get_content_metadata_exporter') as exporter, \
+                mock.patch.object(self.config, 'get_content_metadata_transmitter') as transmitter:
+            self.config.transmit_content_metadata(self.user)
+
+        exporter.assert_not_called()
+        transmitter.assert_not_called()
+
+    def test_preflight_abort_distinguishes_missing_from_invalid(self):
+        """
+        The log separates fields that were never filled in from ones that are filled in but unusable.
+
+        "add a private key" and "the private key you added is truncated" need different actions from
+        an operator, so the message must not flatten them into one wording.
+        """
+        self.config.auth_type = SAPAuthType.SELF_SIGNED_ASSERTION
+        self.config.decrypted_private_key = 'not a key'
+        self.config.saml_assertion_audience = ''
+
+        with mock.patch('channel_integrations.sap_success_factors.models.LOGGER') as logger:
+            with mock.patch.object(self.config, 'get_content_metadata_exporter'):
+                self.config.transmit_content_metadata(self.user)
+
+        logged_message = logger.warning.call_args[0][0]
+        assert 'missing: saml_assertion_audience' in logged_message
+        assert 'invalid: private_key' in logged_message
 
     def test_transmit_single_learner_data_runs_when_configuration_is_complete(self):
         """
