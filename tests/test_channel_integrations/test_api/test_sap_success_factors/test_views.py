@@ -10,9 +10,9 @@ from django.urls import reverse
 
 from enterprise.constants import ENTERPRISE_ADMIN_ROLE
 from enterprise.utils import localized_utcnow
-from channel_integrations.sap_success_factors.models import SAPSuccessFactorsEnterpriseCustomerConfiguration
+from channel_integrations.sap_success_factors.models import SAPAuthType, SAPSuccessFactorsEnterpriseCustomerConfiguration
 from channel_integrations.sap_success_factors.utils import populate_decrypted_fields_sap_success_factors
-from test_utils import APITest, factories
+from test_utils import APITest, factories, generate_test_private_key_pem
 
 ENTERPRISE_ID = str(uuid4())
 
@@ -153,6 +153,70 @@ class SAPSuccessFactorsConfigurationViewSetTests(APITest):
         configs = SAPSuccessFactorsEnterpriseCustomerConfiguration.objects.filter()
         self.assertEqual(response.status_code, 204)
         self.assertEqual(len(configs), 0)
+
+    @mock.patch('enterprise.rules.crum.get_current_request')
+    def test_update_self_signed_auth_type_with_private_key(self, mock_current_request):
+        mock_current_request.return_value = self.get_request_with_jwt_cookie(
+            system_wide_role=ENTERPRISE_ADMIN_ROLE,
+            context=self.enterprise_customer.uuid,
+        )
+        url = reverse('api:v1:sap_success_factors:configuration-detail', args=[self.sap_config.id])
+        private_key = generate_test_private_key_pem()
+        payload = {
+            'sapsf_base_url': 'http://testing2',
+            'sapsf_company_id': 'test',
+            'enterprise_customer': ENTERPRISE_ID,
+            'sapsf_user_id': 893489,
+            'user_type': 'user',
+            'auth_type': SAPAuthType.SELF_SIGNED_ASSERTION,
+            'private_key': private_key,
+        }
+        response = self.client.put(url, payload)
+        self.sap_config.refresh_from_db()
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(self.sap_config.auth_type, SAPAuthType.SELF_SIGNED_ASSERTION)
+        self.assertEqual(self.sap_config.decrypted_private_key.strip(), private_key.strip())
+
+    @mock.patch('enterprise.rules.crum.get_current_request')
+    def test_update_rejects_malformed_private_key(self, mock_current_request):
+        mock_current_request.return_value = self.get_request_with_jwt_cookie(
+            system_wide_role=ENTERPRISE_ADMIN_ROLE,
+            context=self.enterprise_customer.uuid,
+        )
+        url = reverse('api:v1:sap_success_factors:configuration-detail', args=[self.sap_config.id])
+        payload = {
+            'sapsf_base_url': 'http://testing2',
+            'sapsf_company_id': 'test',
+            'enterprise_customer': ENTERPRISE_ID,
+            'sapsf_user_id': 893489,
+            'user_type': 'user',
+            'auth_type': SAPAuthType.SELF_SIGNED_ASSERTION,
+            'private_key': 'not-a-pem-key',
+        }
+        response = self.client.put(url, payload)
+        self.assertEqual(response.status_code, 400)
+        data = json.loads(response.content.decode('utf-8'))
+        self.assertIn('private_key', data)
+        self.sap_config.refresh_from_db()
+        self.assertEqual(self.sap_config.decrypted_private_key, '')
+
+    @mock.patch('enterprise.rules.crum.get_current_request')
+    def test_private_key_never_returned_in_get(self, mock_current_request):
+        mock_current_request.return_value = self.get_request_with_jwt_cookie(
+            system_wide_role=ENTERPRISE_ADMIN_ROLE,
+            context=self.enterprise_customer.uuid,
+        )
+        self.sap_config.auth_type = SAPAuthType.SELF_SIGNED_ASSERTION
+        self.sap_config.decrypted_private_key = generate_test_private_key_pem()
+        self.sap_config.save()
+
+        url = reverse('api:v1:sap_success_factors:configuration-detail', args=[self.sap_config.id])
+        response = self.client.get(url)
+        data = json.loads(response.content.decode('utf-8'))
+        self.assertEqual(response.status_code, 200)
+        self.assertNotIn('private_key', data)
+        self.assertNotIn('private_key_passphrase', data)
+        self.assertEqual(data.get('auth_type'), SAPAuthType.SELF_SIGNED_ASSERTION)
 
     @mock.patch('enterprise.rules.crum.get_current_request')
     def test_is_valid_field(self, mock_current_request):

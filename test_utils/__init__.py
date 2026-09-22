@@ -15,6 +15,8 @@ import uuid
 from unittest import mock
 from urllib.parse import parse_qs, urljoin, urlparse, urlsplit
 
+from cryptography.hazmat.primitives import serialization
+from cryptography.hazmat.primitives.asymmetric import rsa
 from edx_rest_framework_extensions.auth.jwt.cookies import jwt_cookie_name
 from edx_rest_framework_extensions.auth.jwt.tests.utils import generate_jwt_token, generate_unversioned_payload
 from pytest import mark
@@ -89,6 +91,21 @@ def create_items(factory, items):
     """
     for item in items:
         factory.create(**item)
+
+
+def generate_test_private_key_pem():
+    """
+    Generate a fresh, throwaway PEM-encoded RSA private key for use in tests.
+
+    Generated at runtime rather than hardcoded so the test suite never contains a static
+    key-shaped string that secret-scanning tools would flag, even though it holds no real value.
+    """
+    key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
+    return key.private_bytes(
+        encoding=serialization.Encoding.PEM,
+        format=serialization.PrivateFormat.TraditionalOpenSSL,
+        encryption_algorithm=serialization.NoEncryption(),
+    ).decode()
 
 
 def update_url_with_enterprise_context(url, add_utm_info=True, enterprise_catalog_uuid=None):

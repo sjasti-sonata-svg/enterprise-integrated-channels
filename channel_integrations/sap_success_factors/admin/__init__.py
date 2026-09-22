@@ -3,6 +3,7 @@ Django admin integration for configuring sap_success_factors app to communicate 
 """
 
 from config_models.admin import ConfigurationModelAdmin
+from django import forms
 from django.contrib import admin, messages
 from django.core.exceptions import ValidationError
 from django.http import HttpResponseRedirect
@@ -13,10 +14,51 @@ from channel_integrations.exceptions import ClientError
 from channel_integrations.integrated_channel.admin import BaseLearnerDataTransmissionAuditAdmin
 from channel_integrations.sap_success_factors.client import SAPSuccessFactorsAPIClient
 from channel_integrations.sap_success_factors.models import (
+    SAPAuthType,
     SAPSuccessFactorsEnterpriseCustomerConfiguration,
     SAPSuccessFactorsGlobalConfiguration,
     SapSuccessFactorsLearnerDataTransmissionAudit,
 )
+from channel_integrations.utils import is_valid_pem_private_key
+
+LEGACY_AUTH_FIELDS = ("decrypted_key", "decrypted_secret")
+MODERN_AUTH_FIELDS = (
+    "decrypted_private_key",
+    "decrypted_private_key_passphrase",
+    "saml_assertion_audience",
+)
+
+
+class SAPSuccessFactorsEnterpriseCustomerConfigurationAdminForm(forms.ModelForm):
+    """
+    Admin form that validates credentials required for the selected ``auth_type``.
+    """
+
+    class Meta:
+        model = SAPSuccessFactorsEnterpriseCustomerConfiguration
+        fields = "__all__"
+
+    def clean(self):
+        cleaned_data = super().clean()
+        auth_type = cleaned_data.get("auth_type")
+        is_switching_to_self_signed = (
+            auth_type == SAPAuthType.SELF_SIGNED_ASSERTION
+            and "decrypted_private_key" in self.fields
+        )
+        if is_switching_to_self_signed:
+            private_key = cleaned_data.get("decrypted_private_key")
+            passphrase = cleaned_data.get("decrypted_private_key_passphrase")
+            if not private_key:
+                self.add_error(
+                    "decrypted_private_key",
+                    "A private key is required when the auth type is self-signed.",
+                )
+            elif not is_valid_pem_private_key(private_key, passphrase):
+                self.add_error(
+                    "decrypted_private_key",
+                    "Must be a PEM-encoded private key.",
+                )
+        return cleaned_data
 
 
 @admin.register(SAPSuccessFactorsGlobalConfiguration)
@@ -43,15 +85,17 @@ class SAPSuccessFactorsEnterpriseCustomerConfigurationAdmin(DjangoObjectActions,
     """
     Django admin model for SAPSuccessFactorsEnterpriseCustomerConfiguration.
     """
+    form = SAPSuccessFactorsEnterpriseCustomerConfigurationAdminForm
+
     fields = (
         "enterprise_customer",
         "idp_id",
         "active",
         "sapsf_base_url",
         "sapsf_company_id",
+        "auth_type",
         "decrypted_key",
         "decrypted_secret",
-        "auth_type",
         "decrypted_private_key",
         "decrypted_private_key_passphrase",
         "saml_assertion_audience",
@@ -88,6 +132,21 @@ class SAPSuccessFactorsEnterpriseCustomerConfigurationAdmin(DjangoObjectActions,
 
     class Meta:
         model = SAPSuccessFactorsEnterpriseCustomerConfiguration
+
+    def get_fields(self, request, obj=None):
+        """
+        Show only the credential fields relevant to the configuration's ``auth_type``.
+
+        A new (unsaved) configuration defaults to SAP-signed auth, so the self-signed fields
+        stay hidden until an admin has explicitly switched it, avoiding a wall of unused inputs.
+        """
+        fields = list(super().get_fields(request, obj))
+        auth_type = getattr(obj, "auth_type", SAPAuthType.SAP_SIGNED_ASSERTION)
+        if auth_type == SAPAuthType.SELF_SIGNED_ASSERTION:
+            hidden_fields = LEGACY_AUTH_FIELDS
+        else:
+            hidden_fields = MODERN_AUTH_FIELDS
+        return [field for field in fields if field not in hidden_fields]
 
     def enterprise_customer_name(self, obj):
         """

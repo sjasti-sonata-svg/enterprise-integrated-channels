@@ -10,6 +10,7 @@ from channel_integrations.api.serializers import (
 from channel_integrations.sap_success_factors.models import (
     SAPSuccessFactorsEnterpriseCustomerConfiguration,
 )
+from channel_integrations.utils import is_valid_pem_private_key
 
 
 class SAPSuccessFactorsConfigSerializer(EnterpriseCustomerPluginConfigSerializer):
@@ -21,6 +22,10 @@ class SAPSuccessFactorsConfigSerializer(EnterpriseCustomerPluginConfigSerializer
             "sapsf_company_id",
             "sapsf_user_id",
             "secret",
+            "auth_type",
+            "private_key",
+            "private_key_passphrase",
+            "saml_assertion_audience",
             "user_type",
             "additional_locales",
             "show_course_price",
@@ -31,8 +36,27 @@ class SAPSuccessFactorsConfigSerializer(EnterpriseCustomerPluginConfigSerializer
 
     key = serializers.CharField(required=False, allow_blank=False, read_only=False)
     secret = serializers.CharField(required=False, allow_blank=False, read_only=False)
+    private_key = serializers.CharField(
+        required=False, allow_blank=False, write_only=True
+    )
+    private_key_passphrase = serializers.CharField(
+        required=False, allow_blank=True, write_only=True
+    )
 
-    def _handle_credentials(self, instance, key=None, secret=None):
+    def validate(self, attrs):
+        attrs = super().validate(attrs)
+        private_key = attrs.get("private_key")
+        if private_key is not None:
+            passphrase = attrs.get("private_key_passphrase")
+            if not is_valid_pem_private_key(private_key, passphrase):
+                raise serializers.ValidationError(
+                    {"private_key": "Must be a PEM-encoded private key."}
+                )
+        return attrs
+
+    def _handle_credentials(
+        self, instance, key=None, secret=None, private_key=None, private_key_passphrase=None
+    ):
         """
         Helper to update credentials consistently.
         """
@@ -40,21 +64,29 @@ class SAPSuccessFactorsConfigSerializer(EnterpriseCustomerPluginConfigSerializer
             instance.encrypted_key = key
         if secret is not None:
             instance.encrypted_secret = secret
+        if private_key is not None:
+            instance.encrypted_private_key = private_key
+        if private_key_passphrase is not None:
+            instance.encrypted_private_key_passphrase = private_key_passphrase
 
     def create(self, validated_data):
         key = validated_data.pop("key", None)
         secret = validated_data.pop("secret", None)
+        private_key = validated_data.pop("private_key", None)
+        private_key_passphrase = validated_data.pop("private_key_passphrase", None)
 
         instance = super().create(validated_data)
-        self._handle_credentials(instance, key, secret)
+        self._handle_credentials(instance, key, secret, private_key, private_key_passphrase)
         instance.save()
         return instance
 
     def update(self, instance, validated_data):
         key = validated_data.pop("key", None)
         secret = validated_data.pop("secret", None)
+        private_key = validated_data.pop("private_key", None)
+        private_key_passphrase = validated_data.pop("private_key_passphrase", None)
 
         instance = super().update(instance, validated_data)
-        self._handle_credentials(instance, key, secret)
+        self._handle_credentials(instance, key, secret, private_key, private_key_passphrase)
         instance.save()
         return instance
