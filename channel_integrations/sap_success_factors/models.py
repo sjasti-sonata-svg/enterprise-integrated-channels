@@ -11,6 +11,7 @@ from django.db import models
 from django.utils.encoding import force_bytes, force_str
 from django.utils.translation import gettext_lazy as _
 from enterprise.models import EnterpriseCustomer
+from enterprise.utils import localized_utcnow
 from fernet_fields import EncryptedCharField, EncryptedTextField
 
 from channel_integrations.exceptions import ClientError
@@ -27,7 +28,12 @@ from channel_integrations.sap_success_factors.transmitters.content_metadata impo
     SapSuccessFactorsContentMetadataTransmitter,
 )
 from channel_integrations.sap_success_factors.transmitters.learner_data import SapSuccessFactorsLearnerTransmitter
-from channel_integrations.utils import convert_comma_separated_string_to_list, is_valid_url
+from channel_integrations.utils import (
+    convert_comma_separated_string_to_list,
+    generate_formatted_log,
+    is_valid_pem_private_key,
+    is_valid_url,
+)
 
 LOGGER = getLogger(__name__)
 
@@ -343,22 +349,68 @@ class SAPSuccessFactorsEnterpriseCustomerConfiguration(EnterpriseCustomerPluginC
             missing_items.get('missing').append('sapsf_company_id')
         if not self.sapsf_user_id:
             missing_items.get('missing').append('sapsf_user_id')
-        if not self.uses_self_signed_assertion and not self.decrypted_secret:
-            missing_items.get('missing').append('secret')
         if self.uses_self_signed_assertion:
             # saml_assertion_api_path is deliberately not required here: it addresses SAP's IdP
             # endpoint, which this mode replaces by signing the assertion itself.
             if not self.decrypted_private_key:
                 missing_items.get('missing').append('private_key')
+            elif not is_valid_pem_private_key(
+                self.decrypted_private_key, self.decrypted_private_key_passphrase
+            ):
+                incorrect_items.get('incorrect').append('private_key')
             if not self.saml_assertion_audience:
                 missing_items.get('missing').append('saml_assertion_audience')
             if not SAPSuccessFactorsGlobalConfiguration.current().oauth_token_api_path:
                 missing_items.get('missing').append('oauth_token_api_path')
+        elif not self.decrypted_secret:
+            missing_items.get('missing').append('secret')
+
         if not is_valid_url(self.sapsf_base_url):
             incorrect_items.get('incorrect').append('sapsf_base_url')
         if len(self.display_name) > 20:
             incorrect_items.get('incorrect').append('display_name')
         return missing_items, incorrect_items
+
+    def is_ready_to_transmit(self, task_name, record_attempt=None):
+        """
+        Refuse a transmission when SAP cannot be authenticated against, logging what is missing.
+
+        SAP is the only channel that overrides this today. A SAP configuration missing a credential
+        cannot obtain a token at all, so letting the sync start only trades a clear configuration
+        error for an opaque SAP authentication failure raised deep inside a worker.
+
+        Gates on what ``is_valid`` reports as absent rather than on everything it reports: a
+        configuration can also be flagged for problems that do not stop it authenticating, such as a
+        ``display_name`` too long for the admin portal, and those must not stop a working sync.
+        ``is_valid`` returns a ``(missing, incorrect)`` pair, so only the first half is consulted.
+
+        Args:
+            task_name: name of the calling method, used only in the log line.
+            record_attempt: optional ``update_content_synced_at`` / ``update_learner_synced_at``
+                -shaped callable. When the gate blocks a run, calling it with ``(now, False)`` keeps
+                ``last_sync_attempted_at`` / ``last_sync_errored_at`` moving, so a broken
+                configuration shows up as erroring right now instead of as a stale timestamp from
+                whenever it last worked.
+
+        Returns:
+            bool: whether the caller should proceed.
+        """
+        missing_items, _ = self.is_valid
+        missing_fields = missing_items.get('missing', [])
+        if not missing_fields:
+            return True
+        LOGGER.warning(
+            generate_formatted_log(
+                channel_name=self.channel_code(),
+                enterprise_customer_uuid=self.enterprise_customer.uuid,
+                plugin_configuration_id=self.id,
+                message=f'{task_name} aborted before any request to the channel because required '
+                        f'configuration is missing: {", ".join(missing_fields)}.'
+            )
+        )
+        if record_attempt is not None:
+            record_attempt(localized_utcnow(), False)
+        return False
 
     def __str__(self):
         """

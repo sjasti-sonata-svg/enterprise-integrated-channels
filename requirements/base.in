@@ -9,6 +9,7 @@ pytz
 requests
 edx-opaque-keys[django]
 celery
+cryptography          # Private key parsing for SAP SuccessFactors SAML bearer configuration validation.
 edx_django_utils
 jsonfield
 django-model-utils

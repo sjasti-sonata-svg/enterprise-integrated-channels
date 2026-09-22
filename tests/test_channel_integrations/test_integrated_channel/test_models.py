@@ -12,6 +12,7 @@ from enterprise.utils import get_content_metadata_item_id, localized_utcnow
 from channel_integrations.integrated_channel.models import (
     ApiResponseRecord,
     ContentMetadataItemTransmission,
+    EnterpriseCustomerPluginConfiguration,
     IntegratedChannelAPIRequestLogs,
 )
 from test_utils import factories
@@ -303,3 +304,299 @@ class TestIntegratedChannelAPIRequestLogs(unittest.TestCase, EnterpriseMockMixin
             status_code=self.status_code
         )
         assert expected_string == repr(request_log)
+
+
+@mark.django_db
+class TestTransmissionPreflightCheck(unittest.TestCase):
+    """
+    Tests that the worker entry points refuse to run against an incomplete configuration.
+    """
+
+    def setUp(self):
+        self.config = factories.SAPSuccessFactorsEnterpriseCustomerConfigurationFactory(
+            decrypted_key='a-key',
+            decrypted_secret='a-secret',
+        )
+        self.user = factories.UserFactory()
+        super().setUp()
+
+    def test_transmit_content_metadata_runs_when_configuration_is_complete(self):
+        """
+        A complete configuration still reaches the exporter and transmitter.
+        """
+        with mock.patch.object(self.config, 'get_content_metadata_exporter') as exporter, \
+                mock.patch.object(self.config, 'get_content_metadata_transmitter') as transmitter:
+            self.config.transmit_content_metadata(self.user)
+
+        exporter.assert_called_once_with(self.user)
+        transmitter.assert_called_once()
+
+    def test_transmit_content_metadata_aborts_when_credentials_are_missing(self):
+        """
+        Content metadata transmission stops before building a client that would call SAP unauthenticated.
+        """
+        self.config.decrypted_secret = ''
+
+        with mock.patch.object(self.config, 'get_content_metadata_exporter') as exporter, \
+                mock.patch.object(self.config, 'get_content_metadata_transmitter') as transmitter:
+            self.config.transmit_content_metadata(self.user)
+
+        exporter.assert_not_called()
+        transmitter.assert_not_called()
+
+    def test_transmit_learner_data_runs_when_configuration_is_complete(self):
+        """
+        A complete configuration still reaches the exporter and transmitter.
+        """
+        with mock.patch.object(self.config, 'get_learner_data_exporter') as exporter, \
+                mock.patch.object(self.config, 'get_learner_data_transmitter') as transmitter:
+            self.config.transmit_learner_data(self.user)
+
+        exporter.assert_called_once_with(self.user)
+        transmitter.assert_called_once()
+
+    def test_transmit_learner_data_aborts_when_credentials_are_missing(self):
+        """
+        Learner data transmission stops before building a client that would call SAP unauthenticated.
+        """
+        self.config.decrypted_key = ''
+
+        with mock.patch.object(self.config, 'get_learner_data_exporter') as exporter, \
+                mock.patch.object(self.config, 'get_learner_data_transmitter') as transmitter:
+            self.config.transmit_learner_data(self.user)
+
+        exporter.assert_not_called()
+        transmitter.assert_not_called()
+
+    def test_preflight_abort_names_the_missing_fields(self):
+        """
+        The abort log tells an operator which fields to fill in, so the sync gap is diagnosable.
+        """
+        self.config.decrypted_key = ''
+        self.config.decrypted_secret = ''
+
+        with mock.patch('channel_integrations.sap_success_factors.models.LOGGER') as logger:
+            with mock.patch.object(self.config, 'get_content_metadata_exporter'):
+                self.config.transmit_content_metadata(self.user)
+
+        logger.warning.assert_called_once()
+        logged_message = logger.warning.call_args[0][0]
+        assert 'transmit_content_metadata aborted' in logged_message
+        assert 'key' in logged_message
+        assert 'secret' in logged_message
+
+    def test_preflight_ignores_problems_that_do_not_block_authentication(self):
+        """
+        A cosmetic problem must not stop a customer that is otherwise syncing correctly.
+
+        ``is_valid`` also reports an over-long ``display_name``; gating on that would silently take a
+        working integration offline.
+        """
+        self.config.display_name = 'a-display-name-well-over-twenty-characters'
+
+        _, incorrect = self.config.is_valid
+        assert 'display_name' in incorrect['incorrect']
+
+        with mock.patch.object(self.config, 'get_content_metadata_exporter') as exporter, \
+                mock.patch.object(self.config, 'get_content_metadata_transmitter'):
+            self.config.transmit_content_metadata(self.user)
+
+        exporter.assert_called_once_with(self.user)
+
+    def test_transmit_single_learner_data_runs_when_configuration_is_complete(self):
+        """
+        The per-learner completion path also reaches the exporter and transmitter when configured.
+        """
+        with mock.patch.object(self.config, 'get_learner_data_exporter') as exporter, \
+                mock.patch.object(self.config, 'get_learner_data_transmitter') as transmitter:
+            self.config.transmit_single_learner_data()
+
+        exporter.assert_called_once()
+        transmitter.assert_called_once()
+
+    def test_transmit_single_learner_data_aborts_when_credentials_are_missing(self):
+        """
+        A single learner's grade sync is still a call to SAP with the same credentials -- gate it too.
+        """
+        self.config.decrypted_key = ''
+
+        with mock.patch.object(self.config, 'get_learner_data_exporter') as exporter, \
+                mock.patch.object(self.config, 'get_learner_data_transmitter') as transmitter:
+            self.config.transmit_single_learner_data()
+
+        exporter.assert_not_called()
+        transmitter.assert_not_called()
+
+    def test_transmit_subsection_learner_data_runs_when_configuration_is_complete(self):
+        """
+        The assessment-level sync path also reaches the exporter and transmitter when configured.
+        """
+        with mock.patch.object(self.config, 'get_learner_data_exporter') as exporter, \
+                mock.patch.object(self.config, 'get_learner_data_transmitter') as transmitter:
+            self.config.transmit_subsection_learner_data(self.user)
+
+        exporter.assert_called_once_with(self.user)
+        transmitter.assert_called_once()
+
+    def test_transmit_subsection_learner_data_aborts_when_credentials_are_missing(self):
+        """
+        Assessment-level sync uses the same credentials as everything else -- gate it too.
+        """
+        self.config.decrypted_key = ''
+
+        with mock.patch.object(self.config, 'get_learner_data_exporter') as exporter, \
+                mock.patch.object(self.config, 'get_learner_data_transmitter') as transmitter:
+            self.config.transmit_subsection_learner_data(self.user)
+
+        exporter.assert_not_called()
+        transmitter.assert_not_called()
+
+    def test_transmit_single_subsection_learner_data_runs_when_configuration_is_complete(self):
+        """
+        The per-learner assessment-grade path also reaches the exporter and transmitter when configured.
+        """
+        with mock.patch.object(self.config, 'get_learner_data_exporter') as exporter, \
+                mock.patch.object(self.config, 'get_learner_data_transmitter') as transmitter:
+            self.config.transmit_single_subsection_learner_data()
+
+        exporter.assert_called_once()
+        transmitter.assert_called_once()
+
+    def test_transmit_single_subsection_learner_data_aborts_when_credentials_are_missing(self):
+        """
+        A single learner's assessment grade sync is still a call to SAP -- gate it too.
+        """
+        self.config.decrypted_key = ''
+
+        with mock.patch.object(self.config, 'get_learner_data_exporter') as exporter, \
+                mock.patch.object(self.config, 'get_learner_data_transmitter') as transmitter:
+            self.config.transmit_single_subsection_learner_data()
+
+        exporter.assert_not_called()
+        transmitter.assert_not_called()
+
+    def test_cleanup_duplicate_assignment_records_runs_when_configuration_is_complete(self):
+        """
+        Deduplication also reaches the exporter and transmitter when the configuration is complete.
+        """
+        with mock.patch.object(self.config, 'get_learner_data_exporter') as exporter, \
+                mock.patch.object(self.config, 'get_learner_data_transmitter') as transmitter:
+            self.config.cleanup_duplicate_assignment_records(self.user)
+
+        exporter.assert_called_once_with(self.user)
+        transmitter.assert_called_once()
+
+    def test_cleanup_duplicate_assignment_records_aborts_when_credentials_are_missing(self):
+        """
+        Deduplication calls the channel's API too, so it must not run unauthenticated either.
+        """
+        self.config.decrypted_key = ''
+
+        with mock.patch.object(self.config, 'get_learner_data_exporter') as exporter, \
+                mock.patch.object(self.config, 'get_learner_data_transmitter') as transmitter:
+            self.config.cleanup_duplicate_assignment_records(self.user)
+
+        exporter.assert_not_called()
+        transmitter.assert_not_called()
+
+    def test_aborted_content_metadata_still_updates_sync_timestamps(self):
+        """
+        A blocked content sync still moves last_sync_attempted_at/last_content_sync_errored_at, so an
+        operator sees a broken configuration as erroring right now, not as a stale timestamp from
+        whenever it last actually ran.
+        """
+        self.config.decrypted_secret = ''
+        assert self.config.last_sync_attempted_at is None
+        assert self.config.last_content_sync_errored_at is None
+
+        before = localized_utcnow()
+        with mock.patch.object(self.config, 'get_content_metadata_exporter'):
+            self.config.transmit_content_metadata(self.user)
+
+        self.config.refresh_from_db()
+        assert self.config.last_sync_attempted_at >= before
+        assert self.config.last_content_sync_errored_at >= before
+        assert self.config.last_learner_sync_errored_at is None
+
+    def test_aborted_learner_data_still_updates_sync_timestamps(self):
+        """
+        Same guarantee on the learner-data path, using its own errored-at field.
+        """
+        self.config.decrypted_key = ''
+        before = localized_utcnow()
+        with mock.patch.object(self.config, 'get_learner_data_exporter'):
+            self.config.transmit_learner_data(self.user)
+
+        self.config.refresh_from_db()
+        assert self.config.last_sync_attempted_at >= before
+        assert self.config.last_learner_sync_errored_at >= before
+        assert self.config.last_content_sync_errored_at is None
+
+    def test_successful_transmission_does_not_record_an_error_timestamp(self):
+        """
+        The abort path is the only one that marks an error -- a normal run must not trip it.
+        """
+        with mock.patch.object(self.config, 'get_content_metadata_exporter'), \
+                mock.patch.object(self.config, 'get_content_metadata_transmitter'):
+            self.config.transmit_content_metadata(self.user)
+
+        self.config.refresh_from_db()
+        assert self.config.last_sync_errored_at is None
+        assert self.config.last_content_sync_errored_at is None
+
+    def test_cleanup_duplicate_assignment_records_abort_does_not_touch_sync_timestamps(self):
+        """
+        Deduplication is not a sync cycle in its own right, so a blocked run here should not move
+        last_sync_attempted_at and make a broken configuration look like it just synced.
+        """
+        self.config.decrypted_key = ''
+
+        with mock.patch.object(self.config, 'get_learner_data_exporter'):
+            self.config.cleanup_duplicate_assignment_records(self.user)
+
+        self.config.refresh_from_db()
+        assert self.config.last_sync_attempted_at is None
+
+    def test_sap_overrides_the_hook(self):
+        """
+        SAP is the one channel this ticket implements the hook for.
+        """
+        assert type(self.config).is_ready_to_transmit is not EnterpriseCustomerPluginConfiguration.is_ready_to_transmit
+
+
+@mark.django_db
+class TestTransmissionPreflightHookDefault(unittest.TestCase):
+    """
+    Tests that channels which have not overridden the hook are left on their existing behaviour.
+    """
+
+    def setUp(self):
+        self.config = factories.Degreed2EnterpriseCustomerConfigurationFactory()
+        self.user = factories.UserFactory()
+        super().setUp()
+
+    def test_hook_is_a_pass_through_by_default(self):
+        """
+        The base implementation lets everything through, so adding the hook is inert on its own.
+        """
+        assert type(self.config).is_ready_to_transmit is EnterpriseCustomerPluginConfiguration.is_ready_to_transmit
+        assert self.config.is_ready_to_transmit('any_task') is True
+
+    def test_incomplete_configuration_still_transmits_without_an_override(self):
+        """
+        A channel that has not overridden the hook keeps its behaviour, incomplete config and all.
+
+        Degreed2 reports a blank client id as missing, so this configuration would be blocked if the
+        base class gated on ``is_valid`` itself. Implementing the hook is per-channel and deliberate,
+        reviewed against what that channel's ``is_valid`` actually requires.
+        """
+        self.config.decrypted_client_id = ''
+        missing, _ = self.config.is_valid
+        assert 'decrypted_client_id' in missing['missing']
+
+        with mock.patch.object(self.config, 'get_content_metadata_exporter') as exporter, \
+                mock.patch.object(self.config, 'get_content_metadata_transmitter') as transmitter:
+            self.config.transmit_content_metadata(self.user)
+
+        exporter.assert_called_once_with(self.user)
+        transmitter.assert_called_once()

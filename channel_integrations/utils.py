@@ -15,6 +15,7 @@ from urllib.parse import urlparse
 
 import pytz
 import requests
+from cryptography.hazmat.primitives import serialization
 from django.apps import apps
 from django.core.exceptions import ObjectDoesNotExist
 from django.db.models import Q
@@ -424,6 +425,32 @@ def is_valid_url(url):
         result = urlparse(url)
         return all([result.scheme, result.netloc])
     except ValueError:
+        return False
+
+
+def is_valid_pem_private_key(private_key, passphrase=None):
+    """
+    Return whether the given string parses as a PEM-encoded private key.
+
+    Lets configuration validation report a malformed key as a configuration problem instead of
+    letting it surface later as a runtime signing failure inside a background worker.
+
+    Args:
+        private_key: PEM-encoded private key string.
+        passphrase: passphrase protecting ``private_key``, if it is encrypted. A passphrase-protected
+            key raises rather than parsing when no passphrase is supplied, so omitting a stored one
+            here would report a perfectly good configuration as malformed.
+    """
+    if not private_key:
+        return False
+    try:
+        serialization.load_pem_private_key(
+            private_key.encode('utf-8'),
+            password=passphrase.encode('utf-8') if passphrase else None,
+        )
+        return True
+    except (ValueError, TypeError, UnicodeEncodeError):
+        # Deliberately not logging the exception: its message can echo key bytes.
         return False
 
 

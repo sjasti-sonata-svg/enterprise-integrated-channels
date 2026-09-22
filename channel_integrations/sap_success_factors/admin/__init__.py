@@ -43,7 +43,6 @@ class SAPSuccessFactorsEnterpriseCustomerConfigurationAdmin(DjangoObjectActions,
     """
     Django admin model for SAPSuccessFactorsEnterpriseCustomerConfiguration.
     """
-
     fields = (
         "enterprise_customer",
         "idp_id",

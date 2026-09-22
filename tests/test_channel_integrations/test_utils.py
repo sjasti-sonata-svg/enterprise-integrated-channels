@@ -10,12 +10,26 @@ from unittest import mock
 from unittest.mock import MagicMock, PropertyMock
 
 import ddt
+from cryptography.hazmat.primitives import serialization
+from cryptography.hazmat.primitives.asymmetric import rsa
 from pytest import raises
 
 from enterprise.utils import parse_lms_api_datetime
 from channel_integrations import utils
 
 ent_enrollment = namedtuple('enterprise_enrollment', ['is_audit_enrollment'])
+
+
+def _generate_encrypted_private_key_pem(passphrase):
+    """
+    Build a throwaway RSA key encrypted under ``passphrase``, as an operator-supplied PEM would be.
+    """
+    key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
+    return key.private_bytes(
+        serialization.Encoding.PEM,
+        serialization.PrivateFormat.PKCS8,
+        serialization.BestAvailableEncryption(passphrase),
+    ).decode('utf-8')
 
 
 @ddt.ddt
@@ -382,3 +396,58 @@ class TestIntegratedChannelsUtils(unittest.TestCase):
             "Customer", 123, "/endpoint", data_list, 1.23, 200, "response", 'integrated_channel_name'
         )
         assert stringified_list == json.dumps(data_list)
+
+    def test_is_valid_pem_private_key_rejects_empty_input(self):
+        """
+        A blank/falsy value is a missing key, not a malformed one -- callers must not treat it as
+        a parse failure.
+        """
+        assert utils.is_valid_pem_private_key('') is False
+        assert utils.is_valid_pem_private_key(None) is False
+
+    def test_is_valid_pem_private_key_rejects_malformed_key(self):
+        """
+        A non-empty string that isn't a parseable PEM key is reported as invalid, not raised.
+        """
+        assert utils.is_valid_pem_private_key('not a real key') is False
+
+    def test_is_valid_pem_private_key_accepts_a_real_key(self):
+        """
+        A genuine PEM-encoded RSA private key parses successfully.
+        """
+        key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
+        pem = key.private_bytes(
+            serialization.Encoding.PEM,
+            serialization.PrivateFormat.TraditionalOpenSSL,
+            serialization.NoEncryption(),
+        ).decode('utf-8')
+
+        assert utils.is_valid_pem_private_key(pem) is True
+
+    def test_is_valid_pem_private_key_accepts_a_passphrase_protected_key(self):
+        """
+        A passphrase-protected key is valid when its passphrase is supplied.
+
+        ``load_pem_private_key`` raises rather than parsing when an encrypted key is handed no
+        passphrase, so without threading the stored one through, a correctly configured customer
+        would be reported as having a malformed key.
+        """
+        pem = _generate_encrypted_private_key_pem(b'correct-horse')
+
+        assert utils.is_valid_pem_private_key(pem, 'correct-horse') is True
+
+    def test_is_valid_pem_private_key_rejects_passphrase_protected_key_without_passphrase(self):
+        """
+        An encrypted key with no passphrase configured cannot be used to sign, so it is invalid.
+        """
+        pem = _generate_encrypted_private_key_pem(b'correct-horse')
+
+        assert utils.is_valid_pem_private_key(pem) is False
+
+    def test_is_valid_pem_private_key_rejects_wrong_passphrase(self):
+        """
+        The wrong passphrase cannot decrypt the key, so the configuration is reported as invalid.
+        """
+        pem = _generate_encrypted_private_key_pem(b'correct-horse')
+
+        assert utils.is_valid_pem_private_key(pem, 'wrong-passphrase') is False

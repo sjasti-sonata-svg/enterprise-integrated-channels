@@ -14,6 +14,21 @@ Change Log
 Unreleased
 **********
 
+0.1.72 – 2026-09-21
+*******************
+
+* feat: make ``SAPSuccessFactorsEnterpriseCustomerConfiguration.is_valid`` aware of ``auth_type``,
+  requiring a Client Secret for ``sap_signed_assertion`` customers and a parseable private key,
+  assertion audience, and token endpoint path for ``self_signed_assertion`` customers, so migrated
+  customers are no longer reported as ``INVALID_CONFIG``. Abort SAP transmission entry points before
+  any request when required configuration is missing, naming the missing fields in the log and
+  keeping sync-attempt timestamps moving so a broken configuration shows up as erroring now instead of
+  going stale. ``EnterpriseCustomerPluginConfiguration`` gains an ``is_ready_to_transmit`` hook that
+  passes everything through by default; SAP is the only channel that implements it, so every other
+  channel keeps its current behaviour until it is overridden under its own ticket. Private key
+  validation honours the configured
+  ``decrypted_private_key_passphrase``, since a passphrase-protected key cannot be parsed without it.
+
 0.1.71 – 2026-09-17
 *******************
 
