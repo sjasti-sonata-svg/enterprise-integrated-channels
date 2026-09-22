@@ -620,6 +620,27 @@ class TestTransmissionPreflightCheck(unittest.TestCase):
         self.config.refresh_from_db()
         assert self.config.last_sync_attempted_at is None
 
+    def test_gate_runs_ahead_of_disabled_learner_transmissions(self):
+        """
+        Pins a second-order effect of gating at the entry point rather than in the transmitter.
+
+        ``disable_learner_data_transmissions`` is honoured inside the learner-data transmitters, so
+        it is checked after this gate. A customer who has switched learner data off and also has an
+        incomplete configuration therefore records a learner-sync error, where before the run was
+        skipped in silence. Accepted: the configuration is genuinely broken and the content-metadata
+        path would report it anyway. Pinned so that it stays a decision rather than a surprise.
+        """
+        self.config.disable_learner_data_transmissions = True
+        self.config.decrypted_key = ''
+        self.config.save()
+
+        with mock.patch.object(self.config, 'get_learner_data_exporter') as exporter:
+            self.config.transmit_learner_data(self.user)
+
+        exporter.assert_not_called()
+        self.config.refresh_from_db()
+        assert self.config.last_learner_sync_errored_at is not None
+
     def test_sap_overrides_the_hook(self):
         """
         SAP is the one channel this ticket implements the hook for.

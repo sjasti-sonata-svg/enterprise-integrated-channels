@@ -117,6 +117,11 @@ class EnterpriseCustomerPluginConfiguration(SoftDeletionModel):
     # display_name only matters to the admin portal. A channel gating on ``is_valid`` should treat
     # everything except these as blocking, so that a cosmetic problem never takes a working
     # integration offline.
+    #
+    # These name problems, not buckets, so a gate should strain both halves of ``is_valid`` through
+    # them. Today that only ever removes something from 'incorrect', since no channel reports
+    # display_name as absent -- but a channel that starts to would otherwise silently begin
+    # blocking on it, and the set is the one place that decision should be recorded.
     COSMETIC_CONFIG_PROBLEMS = frozenset({'display_name'})
 
     display_name = models.CharField(

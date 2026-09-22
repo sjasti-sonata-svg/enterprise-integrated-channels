@@ -386,6 +386,13 @@ class SAPSuccessFactorsEnterpriseCustomerConfiguration(EnterpriseCustomerPluginC
         in ``COSMETIC_CONFIG_PROBLEMS`` are ignored, so a customer that is otherwise syncing
         correctly is never taken offline over something the channel does not care about.
 
+        Runs ahead of ``disable_learner_data_transmissions``, which the learner-data transmitters
+        check for themselves. A customer who has switched learner data off *and* has an incomplete
+        configuration therefore now records a learner-sync error where the run used to be skipped
+        in silence. That is accepted rather than worked around: the configuration really is broken,
+        the content-metadata path would report it anyway, and duplicating the flag check here to
+        suppress the record would put transmitter logic in the gate.
+
         Args:
             task_name: name of the calling method, used only in the log line.
             record_attempt: optional ``update_content_synced_at`` / ``update_learner_synced_at``
