@@ -29,6 +29,25 @@ MODERN_AUTH_FIELDS = (
 )
 
 
+class WriteOnlySecretWidgetMixin:
+    """
+    Never render a value, so a stored secret isn't exposed in the page HTML on a change form,
+    and a newly submitted-but-rejected value isn't echoed back either when a *different* field
+    on the same form fails validation and Django re-renders this one bound to the submitted data.
+    """
+
+    def format_value(self, value):
+        return ""
+
+
+class WriteOnlySecretTextarea(WriteOnlySecretWidgetMixin, forms.Textarea):
+    pass
+
+
+class WriteOnlySecretTextInput(WriteOnlySecretWidgetMixin, forms.TextInput):
+    pass
+
+
 class SAPSuccessFactorsEnterpriseCustomerConfigurationAdminForm(forms.ModelForm):
     """
     Admin form that validates credentials required for the selected ``auth_type``.
@@ -37,6 +56,32 @@ class SAPSuccessFactorsEnterpriseCustomerConfigurationAdminForm(forms.ModelForm)
     class Meta:
         model = SAPSuccessFactorsEnterpriseCustomerConfiguration
         fields = "__all__"
+        widgets = {
+            "decrypted_private_key": WriteOnlySecretTextarea,
+            "decrypted_private_key_passphrase": WriteOnlySecretTextInput,
+        }
+
+    def clean_decrypted_private_key(self):
+        """
+        A blank submission means "leave the stored key unchanged", not "clear it" -- the field
+        never displays the current value (see ``WriteOnlySecretTextarea``), so an admin has no
+        way to notice, let alone intentionally resubmit, whatever key is already stored.
+        """
+        value = self.cleaned_data.get("decrypted_private_key")
+        if not value and self.instance.pk:
+            return self.instance.decrypted_private_key
+        return value
+
+    def clean_decrypted_private_key_passphrase(self):
+        """
+        Same "blank means unchanged" behavior as ``clean_decrypted_private_key``, for the same
+        reason: this field is also write-only, so a blank submission can't be distinguished from
+        "I want to keep what's already stored" by the admin filling out the form.
+        """
+        value = self.cleaned_data.get("decrypted_private_key_passphrase")
+        if not value and self.instance.pk:
+            return self.instance.decrypted_private_key_passphrase
+        return value
 
     def clean(self):
         cleaned_data = super().clean()

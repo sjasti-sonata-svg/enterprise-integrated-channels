@@ -197,3 +197,64 @@ class TestSAPSuccessFactorsEnterpriseCustomerConfigurationAdminForm(TestCase):
             instance=self.sap_config,
         )
         assert form.is_valid(), form.errors
+
+    def test_stored_private_key_never_rendered_on_change_form(self):
+        """
+        Opening a change form for a config that already has a private key must not put that
+        key's plaintext anywhere in the rendered HTML -- rendering the stored value defeats the
+        write-only guarantee just as surely as returning it from the API would.
+        """
+        self.sap_config.auth_type = SAPAuthType.SELF_SIGNED_ASSERTION
+        self.sap_config.decrypted_private_key = generate_test_private_key_pem()
+        self.sap_config.save()
+
+        form = SAPSuccessFactorsEnterpriseCustomerConfigurationAdminForm(instance=self.sap_config)
+        rendered = str(form)
+
+        assert self.sap_config.decrypted_private_key not in rendered
+        assert "BEGIN RSA PRIVATE KEY" not in rendered
+
+    def test_rejected_submission_does_not_echo_private_key_back(self):
+        """
+        If a *different* field fails validation, Django re-renders this one bound to the
+        submitted POST data. A plain Textarea would echo the newly typed private key straight
+        back into the page HTML on that error page -- exactly as risky as exposing a stored one.
+        """
+        submitted_key = generate_test_private_key_pem()
+        form = SAPSuccessFactorsEnterpriseCustomerConfigurationAdminForm(
+            data=self._form_data(
+                auth_type=SAPAuthType.SELF_SIGNED_ASSERTION,
+                decrypted_private_key=submitted_key,
+                transmission_chunk_size="not-a-number",
+            ),
+            instance=self.sap_config,
+        )
+        assert not form.is_valid()
+        assert "transmission_chunk_size" in form.errors
+        rendered = str(form)
+
+        assert submitted_key not in rendered
+        assert "BEGIN RSA PRIVATE KEY" not in rendered
+
+    def test_blank_private_key_submission_preserves_stored_value(self):
+        """
+        The field never displays the current value, so an admin can't tell what's stored and
+        can't intentionally resubmit it. A blank submission must therefore mean "leave it as is",
+        not "clear the key" -- otherwise every edit to an unrelated field risks silently wiping
+        the customer's credentials.
+        """
+        stored_key = generate_test_private_key_pem()
+        self.sap_config.auth_type = SAPAuthType.SELF_SIGNED_ASSERTION
+        self.sap_config.decrypted_private_key = stored_key
+        self.sap_config.save()
+
+        form = SAPSuccessFactorsEnterpriseCustomerConfigurationAdminForm(
+            data=self._form_data(
+                auth_type=SAPAuthType.SELF_SIGNED_ASSERTION,
+                decrypted_private_key="",
+            ),
+            instance=self.sap_config,
+        )
+        assert form.is_valid(), form.errors
+        saved = form.save()
+        assert saved.decrypted_private_key.strip() == stored_key.strip()
