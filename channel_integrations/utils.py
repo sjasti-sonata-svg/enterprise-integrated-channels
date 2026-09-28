@@ -15,7 +15,9 @@ from urllib.parse import urlparse
 
 import pytz
 import requests
+from cryptography.exceptions import UnsupportedAlgorithm
 from cryptography.hazmat.primitives import serialization
+from cryptography.hazmat.primitives.asymmetric import rsa
 from django.apps import apps
 from django.core.exceptions import ObjectDoesNotExist
 from django.db.models import Q
@@ -430,10 +432,15 @@ def is_valid_url(url):
 
 def is_valid_pem_private_key(private_key, passphrase=None):
     """
-    Return whether the given string parses as a PEM-encoded private key.
+    Return whether the given string parses as a PEM-encoded RSA private key that ``passphrase``
+    (if any) unlocks.
 
     Lets configuration validation report a malformed key as a configuration problem instead of
     letting it surface later as a runtime signing failure inside a background worker.
+
+    Only RSA keys are accepted, matching the key type a SAML bearer assertion signer requires --
+    a syntactically valid PEM key of some other type (e.g. EC) would otherwise be reported as
+    valid here and only fail later when something actually tries to sign with it.
 
     Args:
         private_key: PEM-encoded private key string.
@@ -444,14 +451,14 @@ def is_valid_pem_private_key(private_key, passphrase=None):
     if not private_key:
         return False
     try:
-        serialization.load_pem_private_key(
+        key = serialization.load_pem_private_key(
             private_key.encode('utf-8'),
             password=passphrase.encode('utf-8') if passphrase else None,
         )
-        return True
-    except (ValueError, TypeError, UnicodeEncodeError):
+    except (ValueError, TypeError, UnsupportedAlgorithm, UnicodeEncodeError):
         # Deliberately not logging the exception: its message can echo key bytes.
         return False
+    return isinstance(key, rsa.RSAPrivateKey)
 
 
 def batch_by_pk(ModelClass, extra_filter=Q(), batch_size=10000):

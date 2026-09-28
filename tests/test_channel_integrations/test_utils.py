@@ -11,7 +11,7 @@ from unittest.mock import MagicMock, PropertyMock
 
 import ddt
 from cryptography.hazmat.primitives import serialization
-from cryptography.hazmat.primitives.asymmetric import rsa
+from cryptography.hazmat.primitives.asymmetric import ec, rsa
 from pytest import raises
 
 from enterprise.utils import parse_lms_api_datetime
@@ -451,3 +451,18 @@ class TestIntegratedChannelsUtils(unittest.TestCase):
         pem = _generate_encrypted_private_key_pem(b'correct-horse')
 
         assert utils.is_valid_pem_private_key(pem, 'wrong-passphrase') is False
+
+    def test_is_valid_pem_private_key_rejects_non_rsa_key(self):
+        """
+        A syntactically valid PEM key of a different type (e.g. EC) is rejected. Signing a SAML
+        bearer assertion requires an RSA key specifically, so a key that parses fine but isn't RSA
+        would otherwise be reported as valid here and only fail later when something signs with it.
+        """
+        key = ec.generate_private_key(ec.SECP256R1())
+        pem = key.private_bytes(
+            serialization.Encoding.PEM,
+            serialization.PrivateFormat.TraditionalOpenSSL,
+            serialization.NoEncryption(),
+        ).decode('utf-8')
+
+        assert utils.is_valid_pem_private_key(pem) is False
